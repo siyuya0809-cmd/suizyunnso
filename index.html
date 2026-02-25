@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>水準・縦断測量 現場管理システム</title>
+    <!-- 外部ライブラリの読み込み -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
+        body { 
+            font-family: 'Noto Sans JP', sans-serif; 
+            background-color: #cfd8dc; 
+            background-image: radial-gradient(#b0bec5 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        .kokuban {
+            background-color: #1b4d3e; color: #ffffff;
+            border: 8px solid #5d4037; border-radius: 4px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.4);
+        }
+        .binder { 
+            background-color: #fdfdfd; border: 1px solid #999;
+            border-top: 30px solid #455a64; border-radius: 0 0 10px 10px;
+            box-shadow: 0 15px 30px rgba(0,0,0,0.2); position: relative;
+        }
+        .binder::before {
+            content: ""; position: absolute; top: -25px; left: 50%; transform: translateX(-50%);
+            width: 140px; height: 20px; background-color: #78909c; border-radius: 5px;
+        }
+        .yacho-table { border-collapse: collapse; width: 100%; border: 2px solid #555; }
+        .yacho-table th {
+            background-color: #e8f5e9; color: #2e7d32;
+            border: 1px solid #81c784; padding: 12px 8px; font-weight: 900; text-align: center;
+        }
+        .yacho-table td { border: 1px solid #81c784; background-color: #fff; }
+        .yacho-input {
+            background-color: transparent; border: none; outline: none; width: 100%; 
+            padding: 14px 8px; font-size: 16px; 
+            font-family: 'Consolas', 'Courier New', monospace; font-weight: 700;
+        }
+        .yacho-input:focus { background-color: #fff9c4; }
+        @media print {
+            .no-print { display: none !important; }
+            body { background: white; padding: 0; }
+            .binder { border: none; border-top: none; box-shadow: none; padding: 0; }
+            .yacho-table th, .yacho-table td { border: 1px solid #000 !important; color: #000 !important; }
+            .yacho-table th { background-color: #eee !important; padding: 4px !important; }
+            .yacho-input { padding: 4px !important; font-size: 12px; }
+            input { border: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        const App = () => {
+            // --- States ---
+            const [currentTab, setCurrentTab] = useState('forward');
+            const [siteInfo, setSiteInfo] = useState({
+                siteName: '', routeName: '', machineName: '', machineNo: '',
+                obsDate: new Date().toISOString().split('T')[0],
+                observer: '', recorder: '', inspector: ''
+            });
+
+            const [settings, setSettings] = useState({
+                surveyMethod: '', subSetting: '', commissionedDist: '', machineType: '',
+                staffType: 'barcode', staffGrade: '2', routeShape: 'round_trip',
+                profileMargin: '', ipPoint: 'none'
+            });
+
+            const [rowsF, setRowsF] = useState([{ name: '', dist: '', bf: '', ih: '', is: '', fs: '', gh: '' }]);
+            const [rowsB, setRowsB] = useState([{ name: '', dist: '', bf: '', ih: '', fs: '', gh: '' }]);
+            const [evalResult, setEvalResult] = useState(null);
+            const [isSettingLocked, setIsSettingLocked] = useState(false);
+            
+            // --- 先輩からのアドバイス用ステート ---
+            const [customAdvices, setCustomAdvices] = useState([
+                { id: 1, method: 'profile', text: '設計から役杭の横断はいらないと言われたため、現地に役杭を設置せずに測量を実施した。その結果、役杭を設置していないことを後日の照査で指摘された。指示を鵜呑みにせず、仕様に基づく基本事項は省略しないこと。' },
+                { id: 2, method: 'leveling', text: 'アルミ箱尺の継ぎ目のロックが甘く、数ミリ沈んだまま観測してしまい、後日全区間やり直しになった。使用前の引き出し確認は絶対に行うこと。' }
+            ]);
+            const [isAdviceModalOpen, setIsAdviceModalOpen] = useState(false);
+            const [newAdvice, setNewAdvice] = useState({ method: 'common', text: '' });
+            const [adviceSearchQuery, setAdviceSearchQuery] = useState('');
+
+            const fileInputRef = useRef(null);
+            const adviceFileInputRef = useRef(null);
+
+            // 初回起動時の読み込み
+            useEffect(() => {
+                const storedAdvices = localStorage.getItem('survey_advices_local');
+                if (storedAdvices) {
+                    try { setCustomAdvices(JSON.parse(storedAdvices)); } catch (e) { console.error(e); }
+                }
+                // アイコンのリフレッシュ
+                if (window.lucide) window.lucide.createIcons();
+            }, []);
+
+            // 状態が変わるたびにアイコンを再描画（スタンドアロン Babel のため）
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            });
+
+            // --- アドバイス管理ロジック ---
+            const handleSaveAdvice = () => {
+                if (!newAdvice.text.trim()) return;
+                const advice = { id: Date.now(), method: newAdvice.method, text: newAdvice.text.trim() };
+                const updated = [...customAdvices, advice];
+                setCustomAdvices(updated);
+                localStorage.setItem('survey_advices_local', JSON.stringify(updated));
+                setNewAdvice({ method: 'common', text: '' });
+            };
+
+            const handleDeleteAdvice = (id) => {
+                if (!window.confirm("このアドバイスを削除しますか？")) return;
+                const updated = customAdvices.filter(a => a.id !== id);
+                setCustomAdvices(updated);
+                localStorage.setItem('survey_advices_local', JSON.stringify(updated));
+            };
+
+            const exportAdvices = () => {
+                const blob = new Blob([JSON.stringify(customAdvices, null, 2)], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `先輩からのアドバイス集.json`;
+                a.click();
+            };
+
+            const importAdvices = () => adviceFileInputRef.current.click();
+
+            const handleAdviceFileChange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const imported = JSON.parse(event.target.result);
+                        if (Array.isArray(imported)) {
+                            const merged = [...customAdvices];
+                            imported.forEach(newA => { if(!merged.find(m => m.text === newA.text)) merged.push({...newA, id: Date.now() + Math.random()}); });
+                            setCustomAdvices(merged);
+                            localStorage.setItem('survey_advices_local', JSON.stringify(merged));
+                            alert("読込完了");
+                        }
+                    } catch (err) { alert("読込失敗"); }
+                };
+                reader.readAsText(file);
+                e.target.value = null;
+            };
+
+            const filteredAdvices = useMemo(() => {
+                return customAdvices.filter(adv => 
+                    adv.text.includes(adviceSearchQuery) || adv.method.includes(adviceSearchQuery)
+                );
+            }, [customAdvices, adviceSearchQuery]);
+
+            // --- 現場アドバイス生成 ---
+            const getAdviceList = () => {
+                if (!settings.surveyMethod) return [];
+                const advices = [];
+                const isLeveling = settings.surveyMethod === 'leveling';
+                const surveyGrade = parseInt(settings.subSetting);
+                const mType = settings.machineType;
+                const sType = settings.staffType;
+                const sGrade = parseInt(settings.staffGrade);
+
+                const errors = [];
+                if (isLeveling && !isNaN(surveyGrade) && mType.startsWith('digital_level')) {
+                    const machineGrade = parseInt(mType.split('_').pop());
+                    if (machineGrade > surveyGrade) errors.push(`【機器不適合】${surveyGrade}級水準には${surveyGrade}級以上のレベルが必要です（現在${machineGrade}級を選択中）。`);
+                }
+                if (mType.startsWith('digital_level') && sType !== 'barcode') errors.push('【標尺不適合】電子レベルには「バーコード標尺」が必須です。');
+                if (isLeveling && surveyGrade <= 2 && sType === 'aluminum') errors.push('【材質不適合】1・2級水準でアルミ標尺（箱尺）の使用は原則認められません。');
+
+                if (errors.length > 0) advices.push({ category: '仕様違反・不整合警告', icon: 'alert-triangle', items: errors, isWarning: true });
+
+                advices.push({
+                    category: '測量法・規程',
+                    icon: 'scale',
+                    items: ['測量法第34条に基づき、作業前には必ず機器の点検を実施し記録すること。', '既設標識の保全を徹底すること。']
+                });
+
+                const machineItems = [];
+                if (mType.startsWith('digital')) {
+                    machineItems.push('電子レベルは影や直射日光による誤読に注意。');
+                } else if (mType === 'tilting_level') {
+                    machineItems.push('チルチングは気泡の合致を毎測点確認すること。');
+                } else if (mType === 'total_station') {
+                    machineItems.push('TS間接水準は器械高・目標高の測り間違いに注意。必ず2回測定すること。');
+                }
+                
+                if (sType === 'aluminum') {
+                    machineItems.push('アルミ箱尺の継ぎ目のロック確認を徹底すること。');
+                }
+
+                if(machineItems.length > 0) {
+                    advices.push({
+                        category: '機器・精度注意',
+                        icon: 'file-digit',
+                        items: machineItems
+                    });
+                }
+
+                advices.push({
+                    category: '民法・コンプライアンス',
+                    icon: 'contact',
+                    items: ['民法第209条（隣地使用権）に基づき、立入前の挨拶と説明を徹底。', '竹木の無断伐採は厳禁。']
+                });
+
+                return advices;
+            };
+
+            // --- 計算・入出力 ---
+            const formatValue = (field, val) => (val === '' || isNaN(val)) ? '' : parseFloat(val).toFixed(3);
+
+            const calculateLevels = (rows) => {
+                let currentIH = null;
+                return rows.map((row) => {
+                    let r = { ...row };
+                    const bf = parseFloat(r.bf); const fs = parseFloat(r.fs); const is = parseFloat(r.is || NaN); let gh = parseFloat(r.gh);
+                    if (currentIH !== null) {
+                        if (!isNaN(fs)) { r.gh = (currentIH - fs).toFixed(3); gh = parseFloat(r.gh); }
+                        else if (!isNaN(is)) { r.gh = (currentIH - is).toFixed(3); gh = parseFloat(r.gh); }
+                    }
+                    if (!isNaN(gh) && !isNaN(bf)) { currentIH = gh + bf; r.ih = currentIH.toFixed(3); }
+                    else { r.ih = ''; if (isNaN(bf)) currentIH = null; }
+                    return r;
+                });
+            };
+
+            const handleInputChange = (tbody, index, field, value) => {
+                let target = tbody === 'f' ? [...rowsF] : [...rowsB];
+                target[index][field] = value;
+                if (index === target.length - 1 && value !== '') target.push({ name: '', dist: '', bf: '', ih: '', is: '', fs: '', gh: '' });
+                const calculated = calculateLevels(target);
+                tbody === 'f' ? setRowsF(calculated) : setRowsB(calculated);
+                setEvalResult(null);
+            };
+
+            const handleBlur = (tbody, index, field) => {
+                let target = tbody === 'f' ? [...rowsF] : [...rowsB];
+                if (target[index][field] !== '') {
+                    target[index][field] = formatValue(field, target[index][field]);
+                    const calculated = calculateLevels(target);
+                    tbody === 'f' ? setRowsF(calculated) : setRowsB(calculated);
+                }
+            };
+
+            const deleteRow = (tbody, index) => {
+                let target = tbody === 'f' ? [...rowsF] : [...rowsB];
+                if (target.length > 1) {
+                    target.splice(index, 1);
+                    const calculated = calculateLevels(target);
+                    tbody === 'f' ? setRowsF(calculated) : setRowsB(calculated);
+                }
+            };
+
+            const syncToBackward = () => {
+                if (rowsB.length > 1 || rowsB[0].name !== '') { if (!window.confirm("復路を上書きしますか？")) return; }
+                const fPoints = []; let cDist = 0;
+                rowsF.forEach(r => {
+                    const name = r.name.trim(); const dist = parseFloat(r.dist) || 0; cDist += dist;
+                    if (name && (r.fs !== '' || (r.fs === '' && r.is === ''))) { fPoints.push({ name, dist: cDist, gh: r.gh }); cDist = 0; }
+                });
+                if (fPoints.length < 2) { alert("同期できるデータがありません。"); return; }
+                fPoints.reverse();
+                const newRowsB = fPoints.map((p, i) => ({ name: p.name, dist: i > 0 ? fPoints[i-1].dist.toFixed(3) : '', bf: '', ih: '', fs: '', gh: i === 0 ? p.gh : '' }));
+                newRowsB.push({ name: '', dist: '', bf: '', ih: '', fs: '', gh: '' });
+                setRowsB(calculateLevels(newRowsB));
+            };
+
+            const averageData = useMemo(() => {
+                const grade = parseInt(settings.subSetting) || 3;
+                const coef = grade === 1 ? 2.5 : grade === 2 ? 5.0 : grade === 3 ? 10.0 : grade === 4 ? 20.0 : 40.0;
+                const fData = []; let total = 0;
+                rowsF.forEach(r => {
+                    const dist = parseFloat(r.dist) || 0; total += dist;
+                    if (r.name.trim() && !r.is) fData.push({ name: r.name.trim(), dist: total, fGh: parseFloat(r.gh) });
+                });
+                const bMap = {}; rowsB.forEach(r => { if (r.name.trim()) bMap[r.name.trim()] = parseFloat(r.gh); });
+                return fData.map(p => {
+                    const bGh = bMap[p.name];
+                    const diffMm = (!isNaN(p.fGh) && bGh !== undefined && !isNaN(bGh)) ? Math.abs(p.fGh - bGh) * 1000 : null;
+                    const limit = p.dist > 0 ? coef * Math.sqrt(p.dist / 1000) : 0;
+                    return { ...p, bGh, diffMm, limit, avgGh: (!isNaN(p.fGh) && bGh !== undefined && !isNaN(bGh)) ? (p.fGh + bGh) / 2 : null };
+                });
+            }, [rowsF, rowsB, settings.subSetting]);
+
+            const currentTotalDist = useMemo(() => {
+                const target = currentTab === 'backward' ? rowsB : rowsF;
+                return target.reduce((s, r) => s + (parseFloat(r.dist) || 0), 0);
+            }, [rowsF, rowsB, currentTab]);
+
+            const hStats = useMemo(() => {
+                const getDiff = (rs) => {
+                    let s = null, e = null;
+                    rs.forEach(r => { const v = parseFloat(r.gh); if (!isNaN(v)) { if (s === null) s = v; e = v; } });
+                    return (s !== null && e !== null) ? e - s : 0;
+                };
+                const df = getDiff(rowsF); const db = getDiff(rowsB);
+                return { f: df, b: db, disc: Math.abs(df + db) * 1000 };
+            }, [rowsF, rowsB]);
+
+            const runEvaluation = () => {
+                const distKm = Math.max(currentTotalDist, 1) / 1000;
+                if(distKm <= 0) { alert("距離が入力されていません。"); return; }
+                const grade = parseInt(settings.subSetting) || 3;
+                const coef = grade === 1 ? 2.5 : grade === 2 ? 5.0 : grade === 3 ? 10.0 : grade === 4 ? 20.0 : 40.0;
+                const limit = coef * Math.sqrt(distKm);
+                let score = hStats.disc <= limit ? 100 : 0;
+                if (score === 100 && hStats.disc > limit * 0.8) score = 80;
+                const worst = [...averageData].sort((a, b) => (b.diffMm || 0) - (a.diffMm || 0))[0];
+                setEvalResult({ score, limit, ratio: hStats.disc / limit, worst, passed: hStats.disc <= limit });
+                setCurrentTab('average');
+            };
+
+            // --- 新しく追加・修正したエクスポート関数群 ---
+            const exportDataFile = () => {
+                if (!siteInfo.siteName) { alert("現場名を入力してください。"); return; }
+                const state = { version: 1, siteInfo, settings, rowsF, rowsB };
+                const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `野帳_${siteInfo.siteName}.json`; a.click();
+            };
+
+            const importDataFile = () => fileInputRef.current.click();
+
+            const handleFileChange = (e) => {
+                const file = e.target.files[0]; if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const data = JSON.parse(event.target.result);
+                        if (data.siteInfo) setSiteInfo(data.siteInfo);
+                        if (data.settings) setSettings(data.settings);
+                        if (data.rowsF) setRowsF(data.rowsF);
+                        if (data.rowsB) setRowsB(data.rowsB);
+                        setIsSettingLocked(true); setCurrentTab('forward'); setEvalResult(null);
+                        alert("データを読み込みました。");
+                    } catch (e) { alert("形式エラー：正しい野帳データ（.json）を選択してください。"); }
+                };
+                reader.readAsText(file);
+                e.target.value = null;
+            };
+
+            const exportExcel = () => {
+                if (!window.XLSX) { alert("Excelライブラリをロード中です。少々お待ちください。"); return; }
+                const wb = XLSX.utils.book_new();
+                const infoHead = [
+                    ["現場名", siteInfo.siteName, "路線", siteInfo.routeName],
+                    ["機械名", siteInfo.machineName, "機番", siteInfo.machineNo, "観測日", siteInfo.obsDate],
+                    ["観測者", siteInfo.observer, "記帳者", siteInfo.recorder, "点検者", siteInfo.inspector], []
+                ];
+                const wsF = XLSX.utils.aoa_to_sheet([...infoHead, ["点名", "単距離", "後視", "IH", "IS", "前視", "GH"], ...rowsF.filter(r => r.name).map(r => [r.name, r.dist, r.bf, r.ih, r.is, r.fs, r.gh])]);
+                XLSX.utils.book_append_sheet(wb, wsF, "往路");
+                const wsB = XLSX.utils.aoa_to_sheet([...infoHead, ["点名", "単距離", "後視", "IH", "前視", "GH"], ...rowsB.filter(r => r.name).map(r => [r.name, r.dist, r.bf, r.ih, r.fs, r.gh])]);
+                XLSX.utils.book_append_sheet(wb, wsB, "復路");
+                const wsA = XLSX.utils.aoa_to_sheet([...infoHead, ["点名", "累積距離", "往路高", "復路高", "較差(mm)", "制限(mm)", "平均高"], ...averageData.map(p => [p.name, p.dist, p.fGh, p.bGh, p.diffMm, p.limit, p.avgGh])]);
+                XLSX.utils.book_append_sheet(wb, wsA, "平均計算");
+                XLSX.writeFile(wb, `水準成果_${siteInfo.siteName || '野帳'}.xlsx`);
+            };
+
+            const exportPDF = () => {
+                if (!window.html2pdf) { window.print(); return; }
+                const element = document.getElementById('export-area');
+                window.html2pdf().set({ margin: 10, filename: `成果_${siteInfo.siteName || '野帳'}.pdf`, html2canvas: { scale: 2 }, jsPDF: { format: 'a4' }}).from(element).save();
+            };
+
+            const exportHTML = () => {
+                const state = { siteInfo, settings, rowsF, rowsB };
+                const htmlContent = `<!DOCTYPE html><html><head><title>保存済み測量データ</title></head><body><script>window.__PRELOADED_DATA__ = ${JSON.stringify(state)};<\/script><p>このファイルを測量アプリに読み込ませるか、ソースを確認してください。</p></body></html>`;
+                const a = document.createElement('a'); 
+                a.href = URL.createObjectURL(new Blob([htmlContent], { type: 'text/html' }));
+                a.download = `測量データバックアップ_${siteInfo.siteName || '無題'}.html`; 
+                a.click();
+            };
+
+            const resetApp = () => {
+                if(window.confirm("入力をクリアして新規作成しますか？\n（※登録した先輩のアドバイスは消えません）")) {
+                    setSiteInfo({ siteName: '', routeName: '', machineName: '', machineNo: '', obsDate: new Date().toISOString().split('T')[0], observer: '', recorder: '', inspector: '' });
+                    setSettings({ surveyMethod: '', subSetting: '', commissionedDist: '', machineType: '', staffType: 'barcode', staffGrade: '2', routeShape: 'round_trip', profileMargin: '', ipPoint: 'none' });
+                    setRowsF([{ name: '', dist: '', bf: '', ih: '', is: '', fs: '', gh: '' }]);
+                    setRowsB([{ name: '', dist: '', bf: '', ih: '', fs: '', gh: '' }]);
+                    setIsSettingLocked(false);
+                    setEvalResult(null);
+                    setCurrentTab('forward');
+                }
+            };
+
+            return (
+                <div className="min-h-screen text-slate-900 pb-20">
+                    <header className="kokuban p-6 md:p-8 text-center no-print border-b-8 border-[#5d4037]">
+                        <h1 className="text-xl md:text-3xl font-black mb-1 flex justify-center items-center gap-3">
+                            <i data-lucide="file-digit" className="text-yellow-400"></i> 水準・縦断測量 現場管理システム
+                        </h1>
+                        <p className="text-teal-50 font-bold opacity-80 text-[10px] tracking-widest uppercase">Precision Surveying Control System</p>
+                    </header>
+
+                    <main className="max-w-4xl mx-auto p-3 md:p-6 space-y-6">
+                        {/* 設定セクション */}
+                        <section className="bg-slate-100 p-5 rounded-lg border-2 border-slate-300 no-print shadow-inner relative">
+                            <div className="flex items-center justify-between mb-4 border-b-2 border-slate-800 pb-2 text-slate-800">
+                                <div className="flex items-center gap-2">
+                                    <i data-lucide="settings"></i><h3 className="font-black text-sm">作業設定</h3>
+                                </div>
+                                <button onClick={() => setIsAdviceModalOpen(true)} className="text-xs bg-blue-100 text-blue-800 px-4 py-2 rounded-full font-black flex items-center gap-2 hover:bg-blue-200 shadow-sm">
+                                    <i data-lucide="book-open"></i> 失敗事例・管理
+                                </button>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-slate-500">測量種類</label>
+                                    <select value={settings.surveyMethod} onChange={e=>setSettings({...settings, surveyMethod: e.target.value})} className="w-full p-2 border-2 border-slate-400 rounded font-bold text-xs bg-white">
+                                        <option value="">-- 選択 --</option>
+                                        <option value="leveling">水準測量</option>
+                                        <option value="profile">縦断測量</option>
+                                        <option value="river_crossing">渡海測量</option>
+                                    </select>
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-slate-500">等級・種別</label>
+                                    <select value={settings.subSetting} onChange={e=>setSettings({...settings, subSetting: e.target.value})} className="w-full p-2 border-2 border-slate-400 rounded font-bold text-xs bg-white">
+                                        <option value="">-- 選択 --</option>
+                                        {settings.surveyMethod === 'leveling' && ['1','2','3','4','5'].map(v=><option key={v} value={v}>{v==='5'?'簡易':v+'級'}</option>)}
+                                        {settings.surveyMethod === 'profile' && ['道路','河川','法線','法面','起工','出来高'].map(v=><option key={v} value={v}>{v}</option>)}
+                                        {settings.surveyMethod === 'river_crossing' && ['1','2','3','4'].map(v=><option key={v} value={v}>{v}級</option>)}
+                                    </select>
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-slate-500">委託距離(km)</label>
+                                    <input type="number" step="0.001" value={settings.commissionedDist} onChange={e=>setSettings({...settings, commissionedDist: e.target.value})} className="w-full p-2 border-2 border-slate-400 rounded font-mono font-bold text-blue-700 text-xs" placeholder="0.000" />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-slate-500">使用機器</label>
+                                    <select value={settings.machineType} onChange={e=>setSettings({...settings, machineType: e.target.value})} className="w-full p-2 border-2 border-slate-400 rounded font-bold text-[10px] bg-white">
+                                        <option value="">-- 選択 --</option>
+                                        <option value="digital_level_1">1級 電子レベル</option>
+                                        <option value="digital_level_2">2級 電子レベル</option>
+                                        <option value="digital_level_3">3級 電子レベル</option>
+                                        <option value="tilting_level">チルチング/オート</option>
+                                        <option value="total_station">トータルステーション</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {settings.machineType && (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-3 border-t border-slate-300">
+                                    {(settings.machineType.startsWith('digital_level') || settings.machineType === 'tilting_level') && (
+                                        <>
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] font-bold text-slate-500">標尺の種類</label>
+                                                <select value={settings.staffType} onChange={e=>setSettings({...settings, staffType: e.target.value})} className="w-full p-1.5 border border-slate-400 rounded font-bold text-xs">
+                                                <option value="barcode">バーコード標尺</option>
+                                                <option value="aluminum">アルミ/箱尺等の目盛尺</option>
+                                                </select>
+                                            </div>
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] font-bold text-slate-500">標尺の等級</label>
+                                                <select value={settings.staffGrade} onChange={e=>setSettings({...settings, staffGrade: e.target.value})} className="w-full p-1.5 border border-slate-400 rounded font-bold text-xs">
+                                                <option value="1">1級(インバー)</option>
+                                                <option value="2">2級(木/アルミ等)</option>
+                                                </select>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                            <div className="mt-4 flex justify-center">
+                                <button onClick={()=>setIsSettingLocked(true)} className="bg-slate-900 text-white px-10 py-3 rounded-full font-black shadow-xl flex items-center gap-3 hover:bg-black transition-all active:scale-95 text-sm">
+                                    <i data-lucide="clipboard-check"></i> 設定確定・事前チェック
+                                </button>
+                            </div>
+                        </section>
+
+                        {/* バインダーエリア */}
+                        <div className="binder p-4 md:p-8" id="export-area">
+                            {/* 動的アドバイス */}
+                            {isSettingLocked && (
+                                <div className="mb-6 space-y-4 no-print animate-in fade-in duration-500">
+                                    <div className="border-l-[6px] border-yellow-500 bg-yellow-50 p-4 rounded shadow-sm">
+                                        <h4 className="text-xs font-black text-yellow-900 mb-3 flex items-center gap-2 border-b border-yellow-200 pb-1">
+                                            <i data-lucide="hard-hat"></i> 主任技術者からの指示・点検事項
+                                        </h4>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[10px]">
+                                            {getAdviceList().map((adv, i) => (
+                                                <div key={i} className={`bg-white p-3 rounded border shadow-sm ${adv.isWarning ? 'border-red-400 bg-red-50' : 'border-yellow-200'}`}>
+                                                    <h5 className={`font-black mb-2 border-b pb-1 flex items-center gap-2 ${adv.isWarning ? 'text-red-800' : ''}`}><i data-lucide={adv.icon}></i>{adv.category}</h5>
+                                                    <ul className="list-disc ml-4 space-y-1 text-slate-700 font-bold">
+                                                        {adv.items.map((item, j) => <li key={j} className={adv.isWarning || item.includes('注意') ? 'text-red-700' : ''}>{item}</li>)}
+                                                    </ul>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="border-l-[6px] border-blue-500 bg-blue-50 p-4 rounded shadow-sm">
+                                        <h4 className="text-xs font-black text-blue-900 mb-3 flex items-center gap-2 border-b border-blue-200 pb-1">
+                                            <i data-lucide="contact"></i> 先輩からのアドバイス（過去事例）
+                                        </h4>
+                                        <div className="text-[11px] text-blue-900 font-black">
+                                            {customAdvices.filter(a => a.method === settings.surveyMethod || a.method === 'common').length > 0 ? (
+                                                <ul className="list-disc ml-5 space-y-2">
+                                                    {customAdvices.filter(a => a.method === settings.surveyMethod || a.method === 'common').map(adv => <li key={adv.id}>{adv.text}</li>)}
+                                                </ul>
+                                            ) : <p className="text-slate-400 italic">関連する登録事例はありません。</p>}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ヘッダー */}
+                            <div className="mb-4 border-b-2 border-slate-900 pb-4">
+                                <div className="grid grid-cols-2 gap-4 mb-4">
+                                    <div className="flex flex-col">
+                                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><i data-lucide="map"></i> 現場名</label>
+                                        <input type="text" value={siteInfo.siteName} onChange={e=>setSiteInfo({...siteInfo, siteName: e.target.value})} className="text-xl font-black border-b-2 border-slate-200 bg-transparent py-1 outline-none" />
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><i data-lucide="clipboard-check"></i> 路線名</label>
+                                        <input type="text" value={siteInfo.routeName} onChange={e=>setSiteInfo({...siteInfo, routeName: e.target.value})} className="text-xl font-black border-b-2 border-slate-200 bg-transparent py-1 outline-none" />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-3 md:grid-cols-6 gap-3 text-[9px] font-black uppercase text-slate-500">
+                                    {[
+                                        { l: '機械', k: 'machineName' }, { l: '機番', k: 'machineNo' },
+                                        { l: '日付', k: 'obsDate', t: 'date' }, { l: '観測', k: 'observer' },
+                                        { l: '記帳', k: 'recorder' }, { l: '点検', k: 'inspector' }
+                                    ].map(f=>(
+                                        <div key={f.k} className="flex flex-col">
+                                            <label className="mb-1">{f.l}</label>
+                                            <input type={f.t||'text'} value={siteInfo[f.k]} onChange={e=>setSiteInfo({...siteInfo, [f.k]: e.target.value})} className="border-b border-slate-200 bg-transparent outline-none py-1 text-xs text-slate-900" />
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* データ操作 */}
+                            <div className="flex flex-wrap justify-end gap-2 mb-4 no-print">
+                                <button onClick={exportDataFile} className="bg-blue-600 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-blue-700"><i data-lucide="hard-drive"></i> 野帳保存(.json)</button>
+                                <button onClick={importDataFile} className="bg-amber-600 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-amber-700"><i data-lucide="folder-open"></i> 野帳読込</button>
+                                <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".json" className="hidden" />
+                                <button onClick={exportHTML} className="bg-indigo-600 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-indigo-700"><i data-lucide="file-code"></i> HTML出力</button>
+                                <button onClick={exportExcel} className="bg-emerald-600 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-emerald-700"><i data-lucide="file-spreadsheet"></i> Excel</button>
+                                <button onClick={exportPDF} className="bg-rose-600 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-rose-700"><i data-lucide="printer"></i> PDF</button>
+                                <button onClick={resetApp} className="bg-slate-400 text-white font-black py-2 px-4 rounded shadow text-[10px] flex items-center gap-1 hover:bg-slate-500"><i data-lucide="rotate-ccw"></i> クリア</button>
+                            </div>
+
+                            {/* タブ */}
+                            <div className="flex items-center justify-between no-print border-b-2 border-slate-200 mb-2 overflow-x-auto">
+                                <div className="flex gap-1">
+                                    {['forward','backward','average'].map(t=>(
+                                        <button key={t} onClick={()=>{if(t==='backward')syncToBackward(); setCurrentTab(t);}} className={`px-6 py-3 rounded-t-lg font-black text-xs uppercase ${currentTab===t?'bg-slate-800 text-white shadow-lg':'bg-slate-200 text-slate-500'}`}>
+                                            {t==='forward'?'往路':t==='backward'?'復路':'平均'}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="bg-slate-900 text-white px-4 py-1.5 rounded flex items-center gap-3">
+                                    <span className="text-[9px] font-black opacity-40">距離</span>
+                                    <span className="text-base font-black font-mono text-cyan-400">{currentTotalDist.toFixed(3)}</span>
+                                    <span className="text-[9px] font-black">m</span>
+                                </div>
+                            </div>
+
+                            {/* テーブル */}
+                            <div className="overflow-x-auto border-2 border-slate-800 rounded">
+                                <table className="yacho-table text-[11px] whitespace-nowrap min-w-[700px]">
+                                    {currentTab !== 'average' ? (
+                                        <thead>
+                                            <tr className="bg-slate-100 border-b border-slate-900 font-black">
+                                                <th className="w-24 p-2 text-center">点名</th>
+                                                <th className="w-20 p-2 text-center bg-blue-50">距離(m)</th>
+                                                <th className="w-24 p-2 text-center text-green-800">後視(+)</th>
+                                                <th className="w-28 p-2 text-center text-slate-400 italic">器械高</th>
+                                                {currentTab === 'forward' && <th className="w-24 p-2 text-center text-blue-700">杭下(-)</th>}
+                                                <th className="w-24 p-2 text-center text-red-700">前視(-)</th>
+                                                <th className="w-32 p-2 text-center italic border-r-2 border-r-slate-400">地盤高(GH)</th>
+                                                <th className="w-8 no-print bg-slate-50"></th>
+                                            </tr>
+                                        </thead>
+                                    ) : (
+                                        <thead>
+                                            <tr className="bg-slate-100 border-b border-slate-900 font-black">
+                                                <th className="p-2">点名</th><th className="p-2">累積距離</th><th className="p-2">往路高</th><th className="p-2">復路高</th><th className="p-2 bg-rose-50 text-red-800">較差(mm)</th><th className="p-2 text-slate-400">制限</th><th className="p-2 bg-green-50 text-green-900">平均地盤高</th>
+                                            </tr>
+                                        </thead>
+                                    )}
+                                    <tbody>
+                                        {currentTab !== 'average' && (currentTab === 'forward' ? rowsF : rowsB).map((r, i) => (
+                                            <tr key={i} className="border-b border-slate-200">
+                                                <td className="p-0 border-r border-slate-200"><input type="text" value={r.name} onChange={e=>handleInputChange(currentTab==='forward'?'f':'b',i,'name',e.target.value)} className="yacho-input text-center font-black uppercase" /></td>
+                                                <td className="p-0 bg-blue-50/10 border-r border-slate-200"><input type="number" step="0.001" value={r.dist} onChange={e=>handleInputChange(currentTab==='forward'?'f':'b',i,'dist',e.target.value)} onBlur={()=>handleBlur(currentTab==='forward'?'f':'b',i,'dist')} className="yacho-input text-right text-blue-900 font-bold" /></td>
+                                                <td className="p-0 border-r border-slate-200"><input type="number" step="0.001" value={r.bf} onChange={e=>handleInputChange(currentTab==='forward'?'f':'b',i,'bf',e.target.value)} onBlur={()=>handleBlur(currentTab==='forward'?'f':'b',i,'bf')} className="yacho-input text-right text-green-800" /></td>
+                                                <td className="p-0 bg-slate-50 text-right pr-2 text-slate-400 font-bold italic leading-[2.5] border-r border-slate-200">{r.ih}</td>
+                                                {currentTab === 'forward' && <td className="p-0 bg-blue-50/10 border-r border-slate-200"><input type="number" step="0.001" value={r.is} onChange={e=>handleInputChange('f',i,'is',e.target.value)} onBlur={()=>handleBlur('f',i,'is')} className="yacho-input text-right text-blue-700" /></td>}
+                                                <td className="p-0 border-r border-slate-200"><input type="number" step="0.001" value={r.fs} onChange={e=>handleInputChange(currentTab==='forward'?'f':'b',i,'fs',e.target.value)} onBlur={()=>handleBlur(currentTab==='forward'?'f':'b',i,'fs')} className="yacho-input text-right text-red-800" /></td>
+                                                <td className="p-0 bg-slate-50 text-right pr-2 font-black border-r-2 border-r-slate-400 leading-[2.5]">{r.gh}</td>
+                                                <td className="p-0 text-center no-print"><button onClick={()=>deleteRow(currentTab==='forward'?'f':'b',i)} className="text-slate-300 hover:text-red-600 py-2"><i data-lucide="trash-2"></i></button></td>
+                                            </tr>
+                                        ))}
+                                        {currentTab === 'average' && averageData.map((p, i) => (
+                                            <tr key={i} className="border-b border-slate-300 bg-white">
+                                                <td className="p-2 text-center font-black bg-slate-50 border-r border-slate-300 uppercase">{p.name}</td>
+                                                <td className="p-2 text-right font-mono font-black text-blue-900 border-r border-slate-300">{p.dist.toFixed(3)}</td>
+                                                <td className="p-2 text-right font-mono border-r border-slate-300">{!isNaN(p.fGh) && p.fGh !== null ? p.fGh.toFixed(3) : '-'}</td>
+                                                <td className="p-2 text-right font-mono border-r border-slate-300">{!isNaN(p.bGh) && p.bGh !== null ? p.bGh.toFixed(3) : '-'}</td>
+                                                <td className={`p-2 text-right font-mono font-black border-r border-slate-300 ${p.diffMm > p.limit ? 'text-red-600 bg-red-100 italic' : 'text-slate-800'}`}>{p.diffMm !== null ? p.diffMm.toFixed(1) : '-'}</td>
+                                                <td className="p-2 text-right font-mono text-slate-400 border-r border-slate-300">{p.limit ? p.limit.toFixed(1) : '-'}</td>
+                                                <td className="p-2 text-right font-black text-green-900 bg-green-50 text-lg font-mono border-r border-slate-300 italic">{p.avgGh !== null ? p.avgGh.toFixed(3) : '-'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            {/* アクション */}
+                            <div className="mt-8 flex justify-center no-print">
+                                <button onClick={runEvaluation} className="bg-slate-900 text-white px-20 py-4 rounded-full font-black text-xl shadow-2xl border-b-[6px] border-slate-700 active:translate-y-1 active:border-b-0 flex items-center gap-3 tracking-[0.2em]"><i data-lucide="clipboard-check"></i> 精度審査判定</button>
+                            </div>
+
+                            {/* 判定結果 */}
+                            <div className="mt-10 border-4 border-slate-900 bg-white grid grid-cols-1 md:grid-cols-3 divide-y-4 md:divide-y-0 md:divide-x-4 divide-slate-900 shadow-2xl rounded overflow-hidden">
+                                <div className="p-6 bg-slate-50">
+                                    <h5 className="text-[9px] font-black text-slate-400 mb-4 uppercase">Grade Setting</h5>
+                                    <div className="bg-blue-900 text-white p-4 rounded shadow-inner text-center font-black">
+                                        <div className="text-[10px] text-blue-300">Observation Distance (km)</div>
+                                        <div className="text-3xl font-mono">{(currentTotalDist/1000).toFixed(3)}</div>
+                                    </div>
+                                </div>
+                                <div className="p-6">
+                                    <h5 className="text-[9px] font-black text-slate-400 mb-4 uppercase">Results</h5>
+                                    <div className="flex justify-between items-center border-b pb-1 font-black">
+                                        <span className="text-[10px] text-slate-500 italic">Closure:</span>
+                                        <div className="text-right">
+                                            <span className={`text-4xl font-mono ${evalResult&&!evalResult.passed?'text-red-600':'text-slate-900'}`}>{hStats.disc.toFixed(1)}</span>
+                                            <span className="text-[10px] ml-1 uppercase font-black">mm</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="p-6 bg-slate-100 flex flex-col items-center justify-center relative">
+                                    <div className={`text-3xl font-black border-[10px] border-double px-10 py-5 transform -rotate-12 shadow-2xl ${evalResult ? (evalResult.passed ? 'border-emerald-600 text-emerald-600 bg-white' : 'border-rose-600 text-rose-600 bg-white scale-110') : 'border-slate-300 text-slate-300 opacity-20'}`}>
+                                        {evalResult ? (evalResult.passed ? '合格' : '不合格') : 'READY'}
+                                    </div>
+                                    {evalResult && <div className="mt-8 text-center animate-in zoom-in duration-500 font-black"><p className="text-[8px] text-slate-500">Quality Score</p><div className={`text-6xl ${evalResult.score > 70 ? 'text-blue-700' : 'text-red-700'}`}>{evalResult.score}</div></div>}
+                                </div>
+                            </div>
+                        </div>
+                    </main>
+
+                    {/* 管理モーダル */}
+                    {isAdviceModalOpen && (
+                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 no-print backdrop-blur-sm overflow-y-auto">
+                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                                <div className="bg-blue-600 text-white p-4 flex items-center justify-between shadow-lg">
+                                    <h3 className="font-black flex items-center gap-2"><i data-lucide="book-open"></i> 失敗事例・ナレッジベース管理</h3>
+                                    <button onClick={() => setIsAdviceModalOpen(false)} className="hover:rotate-90 transition-transform"><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-4 flex-1 overflow-y-auto bg-slate-50 space-y-6">
+                                    <div className="space-y-3">
+                                        <div className="flex items-center gap-2 bg-white px-3 py-2 border-2 border-slate-300 rounded shadow-sm">
+                                            <i data-lucide="search" className="text-slate-400"></i>
+                                            <input type="text" placeholder="キーワードで事例を検索..." value={adviceSearchQuery} onChange={e=>setAdviceSearchQuery(e.target.value)} className="w-full text-sm outline-none font-bold" />
+                                        </div>
+                                        <div className="bg-white border border-slate-200 rounded max-h-60 overflow-y-auto shadow-inner">
+                                            {filteredAdvices.length > 0 ? (
+                                                <ul className="divide-y divide-slate-100">
+                                                    {filteredAdvices.map(adv => (
+                                                        <li key={adv.id} className="p-3 hover:bg-blue-50 flex justify-between gap-4 transition-colors">
+                                                            <div className="text-[11px] font-bold">
+                                                                <span className="inline-block bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[9px] mr-2 uppercase">{adv.method}</span>
+                                                                <span className="text-slate-800 leading-relaxed">{adv.text}</span>
+                                                            </div>
+                                                            <button onClick={() => handleDeleteAdvice(adv.id)} className="text-slate-300 hover:text-red-500 self-start p-1"><i data-lucide="trash-2" style={{width:16,height:16}}></i></button>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            ) : <div className="p-10 text-center text-xs text-slate-300 font-black">一致するデータはありません。</div>}
+                                        </div>
+                                    </div>
+                                    <div className="border-t-4 border-double border-slate-200 pt-5 space-y-3">
+                                        <h4 className="font-black text-sm text-blue-900 flex items-center gap-2"><i data-lucide="plus"></i> 新規事例の追加</h4>
+                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                            <select value={newAdvice.method} onChange={e=>setNewAdvice({...newAdvice, method: e.target.value})} className="w-full p-2 border-2 border-slate-300 rounded font-black text-xs bg-white">
+                                                <option value="common">全般・共通</option><option value="leveling">水準測量</option><option value="profile">縦断測量</option><option value="river_crossing">渡海測量</option>
+                                            </select>
+                                            <textarea value={newAdvice.text} onChange={e=>setNewAdvice({...newAdvice, text: e.target.value})} className="w-full p-3 border-2 border-slate-300 rounded font-bold text-xs min-h-[80px] md:col-span-3 outline-none focus:border-blue-600" placeholder="失敗事例や技術的なノウハウを入力してください..." />
+                                        </div>
+                                        <div className="flex justify-end"><button onClick={handleSaveAdvice} className="bg-slate-900 text-white px-8 py-2 rounded-full font-black shadow hover:bg-black text-xs flex items-center gap-2"><i data-lucide="save"></i> 登録する</button></div>
+                                    </div>
+                                </div>
+                                <div className="p-3 bg-slate-200 border-t border-slate-300 flex justify-between items-center">
+                                    <div className="flex gap-2">
+                                        <button onClick={exportAdvices} className="bg-white border border-slate-300 text-slate-600 px-4 py-2 rounded-full text-[10px] font-black hover:bg-blue-50 flex items-center gap-1 shadow-sm"><i data-lucide="download"></i> リスト出力</button>
+                                        <button onClick={importAdvices} className="bg-white border border-slate-300 text-slate-600 px-4 py-2 rounded-full text-[10px] font-black hover:bg-amber-50 flex items-center gap-1 shadow-sm"><i data-lucide="upload"></i> リスト読込</button>
+                                        <input type="file" ref={adviceFileInputRef} onChange={handleAdviceFileChange} accept=".json" className="hidden" />
+                                    </div>
+                                    <button onClick={() => setIsAdviceModalOpen(false)} className="px-6 py-2 font-black text-slate-600 bg-white border border-slate-300 rounded-full text-xs shadow-sm">閉じる</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
